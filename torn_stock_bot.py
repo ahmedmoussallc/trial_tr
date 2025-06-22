@@ -7,15 +7,16 @@ import csv
 import json
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from statistics import mean, pstdev
+from statistics import mean, stdev
 from typing import Dict, List, Tuple
 
+import os
 import requests
 
 # Constants
-API_KEY = "YOUR_API_KEY"
+API_KEY = os.environ.get("TORN_API_KEY", "")
 BUY_THRESH = 0.95
 SELL_THRESH = 1.05
 SIMULATION_ONLY = True
@@ -45,6 +46,8 @@ class Holding:
 
 def torn_get(endpoint: str, selections: str) -> Dict:
     """Query the Torn API and return JSON data."""
+    if not API_KEY:
+        raise RuntimeError("API key not set. Set TORN_API_KEY env var.")
     url = f"{BASE_URL}/{endpoint}/?selections={selections}&key={API_KEY}"
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
@@ -108,7 +111,7 @@ def log_trade(action: str, symbol: str, shares: int, price: float, cash: float, 
         if is_new:
             writer.writerow(["date", "action", "symbol", "shares", "price", "cash_after", "realised_pl"])
         writer.writerow([
-            datetime.utcnow().strftime("%Y-%m-%d"),
+            datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             action,
             symbol,
             shares,
@@ -124,7 +127,7 @@ def decide_trades() -> Tuple[List[Tuple[str, float, float]], List[Tuple[str, flo
     PRICES_DIR.mkdir(exist_ok=True)
     stocks_data = torn_get("torn", "stocks")
     portfolio = load_portfolio()
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     buy_list: List[Tuple[str, float, float]] = []
     sell_list: List[Tuple[str, float, Holding]] = []
 
@@ -138,7 +141,7 @@ def decide_trades() -> Tuple[List[Tuple[str, float, float]], List[Tuple[str, flo
         if len(history) < 7:
             continue
         avg7 = mean(history)
-        vol = pstdev(history) / avg7 if avg7 else 0.0
+        vol = stdev(history) / avg7 if len(history) > 1 and avg7 else 0.0
         if symbol not in portfolio and price < BUY_THRESH * avg7:
             buy_list.append((symbol, price, vol))
         if symbol in portfolio and price > SELL_THRESH * avg7:
@@ -156,7 +159,9 @@ def simulate_trades() -> None:
     starting_cash = cash
     realised_pl = 0.0
 
-    print(f"=== Torn Stock Bot — {datetime.utcnow().strftime('%Y-%m-%d')} (simulation mode) ===")
+    print(
+        f"=== Torn Stock Bot — {datetime.now(timezone.utc).strftime('%Y-%m-%d')} (simulation mode) ==="
+    )
     print(f"Cash balance: ${cash:,.2f}")
     print(f"{len(buy_candidates)} buy-candidates | {len(sell_candidates)} sell-candidates")
 
@@ -176,15 +181,43 @@ def simulate_trades() -> None:
     else:
         cash_per_stock = 0.0
 
+    # First pass: evenly allocate cash
     for symbol, price, _ in buy_candidates:
-        shares = int(math.floor(cash_per_stock / price))
+        shares = int(cash_per_stock // price)
         if shares <= 0:
             continue
         cost = shares * price
         cash -= cost
-        portfolio[symbol] = Holding(shares, price)
+        if symbol in portfolio:
+            holding = portfolio[symbol]
+            new_avg = (holding.shares * holding.avg_price + cost) / (
+                holding.shares + shares
+            )
+            holding.shares += shares
+            holding.avg_price = new_avg
+        else:
+            portfolio[symbol] = Holding(shares, price)
         log_trade("BUY", symbol, shares, price, cash, 0.0)
         print(f"BUY {shares} {symbol} @ ${price:.2f} -> Cash ${cash:,.2f}")
+
+    # Second pass: spend any leftover cash starting from cheapest
+    for symbol, price, _ in sorted(buy_candidates, key=lambda x: x[1]):
+        extra_shares = int(cash // price)
+        if extra_shares <= 0:
+            continue
+        cost = extra_shares * price
+        cash -= cost
+        if symbol in portfolio:
+            holding = portfolio[symbol]
+            new_avg = (holding.shares * holding.avg_price + cost) / (
+                holding.shares + extra_shares
+            )
+            holding.shares += extra_shares
+            holding.avg_price = new_avg
+        else:
+            portfolio[symbol] = Holding(extra_shares, price)
+        log_trade("BUY", symbol, extra_shares, price, cash, 0.0)
+        print(f"BUY {extra_shares} {symbol} @ ${price:.2f} -> Cash ${cash:,.2f}")
 
     save_portfolio(portfolio)
 
