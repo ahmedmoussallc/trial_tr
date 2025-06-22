@@ -15,7 +15,7 @@ from typing import Dict, List, Tuple
 import requests
 
 # Constants
-API_KEY = "YOUR_API_KEY"
+API_KEY = "XLE1EjC6WkHeVrn7"
 BUY_THRESH = 0.95
 SELL_THRESH = 1.05
 SIMULATION_ONLY = True
